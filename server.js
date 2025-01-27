@@ -386,6 +386,22 @@ app.get('/health', (req, res) => {
   });
 
 
+
+  // Add root route
+app.get('/', (req, res) => {
+    res.json({ 
+      status: 'Server is running',
+      endpoints: {
+        status: '/status',
+        disconnect: '/disconnect',
+        sendBulkMessages: '/send-bulk-messages',
+        uploadMedia: '/upload-media',
+        health: '/health'
+      }
+    });
+  });
+
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
