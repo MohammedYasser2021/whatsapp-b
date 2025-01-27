@@ -409,12 +409,33 @@ app.get('/', (req, res) => {
     });
   });
 
+// Add this function to clear uploads and cache
+async function clearUploadsAndCache() {
+    try {
+        // Clear uploads directory
+        const uploadDir = path.join(process.cwd(), 'uploads');
+        if (fs.existsSync(uploadDir)) {
+            fs.rmSync(uploadDir, { recursive: true, force: true });
+            fs.mkdirSync(uploadDir);
+        }
 
-  const PORT = process.env.PORT || 3001;
-  const server = app.listen(PORT, '0.0.0.0', () => {
-      console.log(`Server running on port ${PORT}`);
-  });
-  
+        // Clear auth data
+        await clearAuthData();
+
+        console.log('Successfully cleared uploads and cache');
+    } catch (error) {
+        console.error('Error clearing uploads and cache:', error);
+    }
+}
+
+const PORT = process.env.PORT || 3001;
+// Add this to your server initialization
+const server = app.listen(PORT, '0.0.0.0', async () => {
+    console.log(`Server running on port ${PORT}`);
+    await clearUploadsAndCache(); // Clear everything on server start
+});
+
+
   server.keepAliveTimeout = 120 * 1000;
   server.headersTimeout = 120 * 1000;
   
