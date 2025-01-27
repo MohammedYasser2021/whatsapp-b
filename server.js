@@ -249,11 +249,8 @@ app.post('/send-bulk-messages', async (req, res) => {
                     for (const mediaPath of mediaPaths) {
                         try {
                             const fullPath = path.join(process.cwd(), mediaPath);
-                            console.log('Processing media file:', {
-                                path: fullPath,
-                                exists: fs.existsSync(fullPath)
-                            });
-                            
+                            console.log('Processing media file:', { path: fullPath, exists: fs.existsSync(fullPath) });
+
                             if (!fs.existsSync(fullPath)) {
                                 throw new Error('ملف الوسائط غير موجود');
                             }
@@ -269,12 +266,6 @@ app.post('/send-bulk-messages', async (req, res) => {
                                 throw new Error('حجم الملف كبير جداً. الحد الأقصى هو 16 ميجابايت');
                             }
 
-                            console.log('File stats:', {
-                                size: fileStats.size,
-                                created: fileStats.birthtime,
-                                modified: fileStats.mtime
-                            });
-
                             // Read file in chunks for better memory management
                             const base64Data = await new Promise((resolve, reject) => {
                                 const chunks = [];
@@ -287,15 +278,8 @@ app.post('/send-bulk-messages', async (req, res) => {
                                 stream.on('error', reject);
                             });
 
-                            console.log('File read successfully, base64 length:', base64Data.length);
+                            const media = new MessageMedia(mimeType, base64Data, path.basename(fullPath));
 
-                            const media = new MessageMedia(
-                                mimeType,
-                                base64Data,
-                                path.basename(fullPath)
-                            );
-
-                            // Send the media message with a delay
                             await new Promise(resolve => setTimeout(resolve, 1000)); // Add delay between messages
                             await client.sendMessage(chatId, media, {
                                 sendMediaAsDocument: mimeType.startsWith('video/'),
@@ -304,12 +288,11 @@ app.post('/send-bulk-messages', async (req, res) => {
 
                             console.log('Media sent successfully');
 
+                            // Delete the media file after sending
+                            fs.unlinkSync(fullPath); // Remove the file
+
                         } catch (mediaError) {
-                            console.error('Detailed media error:', {
-                                message: mediaError.message,
-                                stack: mediaError.stack,
-                                mediaPath
-                            });
+                            console.error('Detailed media error:', { message: mediaError.message, stack: mediaError.stack, mediaPath });
                             throw new Error(`فشل في إرسال الوسائط: ${mediaError.message}`);
                         }
                     }
@@ -323,19 +306,20 @@ app.post('/send-bulk-messages', async (req, res) => {
                 console.log('✅ Message sent to:', formattedNumber);
 
             } catch (error) {
-                console.error('Error processing number:', {
-                    number,
-                    error: error.message,
-                    stack: error.stack
-                });
-
-                results.failed.push({
-                    number,
-                    reason: error.message
-                });
+                console.error('Error processing number:', { number, error: error.message, stack: error.stack });
+                results.failed.push({ number, reason: error.message });
                 console.log('❌ Failed for:', number, error.message);
             }
         }
+
+        // Clean up the upload folder and session data after sending messages
+        const uploadDir = path.join(process.cwd(), 'uploads');
+        if (fs.existsSync(uploadDir)) {
+            fs.rmSync(uploadDir, { recursive: true, force: true });
+            console.log('Uploads folder deleted');
+        }
+
+        await clearAuthData(); // Clear authentication data
 
         res.json({ results });
 
@@ -344,6 +328,7 @@ app.post('/send-bulk-messages', async (req, res) => {
         res.status(500).json({ error: 'خطأ في معالجة الطلب: ' + error.message });
     }
 });
+
 
 app.post('/upload-media', (req, res) => {
     upload.single('media')(req, res, function(err) {
