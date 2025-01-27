@@ -117,7 +117,7 @@ async function clearAuthData() {
         }
     } catch (error) {
         console.error('Error clearing auth data:', error);
-        throw error; // Propagate the error to handle it in the calling function
+        throw error;
     }
 }
 
@@ -206,7 +206,6 @@ app.post('/disconnect', async (req, res) => {
     }
 });
 
-// Improved send-bulk-messages endpoint
 app.post('/send-bulk-messages', async (req, res) => {
     if (!client || connectionStatus !== 'connected') {
         return res.status(400).json({ error: 'WhatsApp client not connected' });
