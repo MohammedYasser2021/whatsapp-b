@@ -23,7 +23,6 @@ const storage = multer.diskStorage({
         }
     },
     filename: function (req, file, cb) {
-        // Sanitize filename and add timestamp
         const timestamp = Date.now();
         const ext = path.extname(file.originalname);
         const safeName = `${timestamp}${ext}`.replace(/[^a-zA-Z0-9.-]/g, '');
@@ -31,55 +30,36 @@ const storage = multer.diskStorage({
     }
 });
 
-// Configure multer with file size limits and file type validation
 const upload = multer({
     storage: storage,
     limits: {
-        fileSize: 16 * 1024 * 1024, // 16MB max file size for WhatsApp
+        fileSize: 16 * 1024 * 1024,
     },
     fileFilter: (req, file, cb) => {
-        console.log('Received file:', {
-            originalname: file.originalname,
-            mimetype: file.mimetype
-        });
-
-        // Accept images, videos, and audio files
         const allowedMimes = [
-            'image/jpeg',
-            'image/png',
-            'image/gif',
-            'video/mp4',
-            'video/mpeg',
-            'video/quicktime',
-            'video/webm',
-            'audio/mpeg',
-            'audio/wav',
-            'audio/ogg',
-            'audio/webm',
-            'audio/mp4',
-            'audio/aac',
-            'audio/x-m4a',
-            'application/ogg'
+            'image/jpeg', 'image/png', 'image/gif',
+            'video/mp4', 'video/mpeg', 'video/quicktime', 'video/webm',
+            'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm',
+            'audio/mp4', 'audio/aac', 'audio/x-m4a', 'application/ogg'
         ];
-
-        if (allowedMimes.includes(file.mimetype) || file.mimetype.startsWith('audio/') || file.mimetype.startsWith('video/')) {
+        if (allowedMimes.includes(file.mimetype) || 
+            file.mimetype.startsWith('audio/') || 
+            file.mimetype.startsWith('video/')) {
             cb(null, true);
         } else {
-            console.log('Rejected file type:', file.mimetype);
             cb(new Error(`نوع الملف غير مدعوم: ${file.mimetype}`));
         }
     }
 });
 
-// Middleware
 app.use(cors({
     origin: 'https://whatsapp-f.vercel.app',
     methods: ['GET', 'POST'],
     credentials: true,
     optionsSuccessStatus: 200
-  }));
+}));
 
-  app.use((req, res, next) => {
+app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', 'https://whatsapp-f.vercel.app');
     res.header('Access-Control-Allow-Credentials', 'true');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
@@ -90,12 +70,84 @@ app.use(express.json({ limit: '16mb' }));
 app.use(express.urlencoded({ extended: true, limit: '16mb' }));
 app.use('/uploads', express.static('uploads'));
 
-
-  
-
 let client;
 let connectionStatus = 'disconnected';
 let qrCodeData = null;
+let messageQueue = [];
+let isProcessingQueue = false;
+
+async function processMessageQueue() {
+    if (isProcessingQueue || messageQueue.length === 0) return;
+    
+    isProcessingQueue = true;
+    console.log(`Processing message queue. Items: ${messageQueue.length}`);
+
+    while (messageQueue.length > 0) {
+        const task = messageQueue[0];
+        try {
+            const { number, message, mediaPaths } = task;
+            console.log(`Processing message for number: ${number}`);
+
+            const chatId = `${number}@c.us`;
+            const isRegistered = await client.isRegisteredUser(chatId);
+            
+            if (!isRegistered) {
+                throw new Error('رقم غير مسجل في واتساب');
+            }
+
+            if (mediaPaths && mediaPaths.length > 0) {
+                for (const mediaPath of mediaPaths) {
+                    const fullPath = path.join(process.cwd(), mediaPath);
+                    if (!fs.existsSync(fullPath)) {
+                        throw new Error('ملف الوسائط غير موجود');
+                    }
+
+                    const mimeType = mime.lookup(fullPath);
+                    const base64Data = fs.readFileSync(fullPath, { encoding: 'base64' });
+                    const media = new MessageMedia(mimeType, base64Data, path.basename(fullPath));
+
+                    await client.sendMessage(chatId, media, {
+                        sendMediaAsDocument: mimeType.startsWith('video/'),
+                        caption: message
+                    });
+                }
+            } else if (message) {
+                await client.sendMessage(chatId, message);
+            }
+
+            task.resolve({ success: true, number });
+        } catch (error) {
+            console.error(`Error processing message for ${task.number}:`, error);
+            task.reject({ success: false, number: task.number, error: error.message });
+        }
+
+        messageQueue.shift();
+        await new Promise(resolve => setTimeout(resolve, 3000)); // 3 second delay between messages
+    }
+
+    isProcessingQueue = false;
+}
+
+async function ensureConnection() {
+    if (!client?.isReady) {
+        console.log('Client not ready, reinitializing...');
+        await destroyClient();
+        await clearAuthData();
+        initializeWhatsApp();
+        
+        return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                reject(new Error('Connection timeout'));
+            }, 30000);
+
+            client.once('ready', () => {
+                clearTimeout(timeout);
+                resolve();
+            });
+        });
+    }
+    return Promise.resolve();
+}
 
 async function destroyClient() {
     connectionStatus = 'disconnecting';
@@ -156,6 +208,7 @@ function initializeWhatsApp() {
         connectionStatus = 'connected';
         qrCodeData = null;
         console.log('WhatsApp client is ready!');
+        processMessageQueue(); // Start processing any pending messages
     });
 
     client.on('authenticated', () => {
@@ -172,6 +225,7 @@ function initializeWhatsApp() {
         console.log('WhatsApp disconnected!');
         await destroyClient();
         await clearAuthData();
+        messageQueue = []; // Clear the queue on disconnect
         initializeWhatsApp();
     });
 
@@ -186,10 +240,8 @@ function initializeWhatsApp() {
     }
 }
 
-// Initialize WhatsApp client
 initializeWhatsApp();
 
-// Routes
 app.get('/status', (req, res) => {
     res.json({ 
         status: connectionStatus,
@@ -201,9 +253,9 @@ app.post('/disconnect', async (req, res) => {
     try {
         await destroyClient();
         await clearAuthData();
+        messageQueue = []; // Clear the queue on disconnect
         connectionStatus = 'initializing';
         initializeWhatsApp();
-        
         res.json({ 
             success: true, 
             message: 'Disconnected successfully',
@@ -214,7 +266,6 @@ app.post('/disconnect', async (req, res) => {
         connectionStatus = 'initializing';
         qrCodeData = null;
         initializeWhatsApp();
-        
         res.json({ 
             success: true, 
             message: 'Disconnected with recovery',
@@ -225,10 +276,12 @@ app.post('/disconnect', async (req, res) => {
 
 app.post('/send-bulk-messages', async (req, res) => {
     try {
+        await ensureConnection();
+        
         const { numbers, message, mediaPaths } = req.body;
         console.log('Received request:', { numbers, message, mediaPaths });
 
-        if (!client) {
+        if (!client?.isReady) {
             return res.status(400).json({ error: 'WhatsApp client not initialized' });
         }
 
@@ -237,113 +290,39 @@ app.post('/send-bulk-messages', async (req, res) => {
         }
 
         const results = { success: [], failed: [] };
-
-        for (const number of numbers) {
-            try {
-                let formattedNumber = number.toString().replace(/\D/g, '');
-                if (!formattedNumber.startsWith('20')) {
-                    formattedNumber = '20' + formattedNumber;
-                }
-                const chatId = `${formattedNumber}@c.us`;
-
-                console.log(`Processing number: ${formattedNumber}`);
-
-                const isRegistered = await client.isRegisteredUser(chatId);
-                if (!isRegistered) {
-                    throw new Error('رقم غير مسجل في واتساب');
-                }
-
-                if (mediaPaths && mediaPaths.length > 0) {
-                    for (const mediaPath of mediaPaths) {
-                        try {
-                            const fullPath = path.join(process.cwd(), mediaPath);
-                            console.log('Processing media file:', {
-                                path: fullPath,
-                                exists: fs.existsSync(fullPath)
-                            });
-                            
-                            if (!fs.existsSync(fullPath)) {
-                                throw new Error('ملف الوسائط غير موجود');
-                            }
-
-                            const mimeType = mime.lookup(fullPath);
-                            if (!mimeType) {
-                                throw new Error('نوع الملف غير مدعوم');
-                            }
-                            console.log('Detected MIME type:', mimeType);
-
-                            const fileStats = fs.statSync(fullPath);
-                            if (fileStats.size > 16 * 1024 * 1024) {
-                                throw new Error('حجم الملف كبير جداً. الحد الأقصى هو 16 ميجابايت');
-                            }
-
-                            console.log('File stats:', {
-                                size: fileStats.size,
-                                created: fileStats.birthtime,
-                                modified: fileStats.mtime
-                            });
-
-                            // Read file in chunks for better memory management
-                            const base64Data = await new Promise((resolve, reject) => {
-                                const chunks = [];
-                                const stream = fs.createReadStream(fullPath);
-                                stream.on('data', chunk => chunks.push(chunk));
-                                stream.on('end', () => {
-                                    const buffer = Buffer.concat(chunks);
-                                    resolve(buffer.toString('base64'));
-                                });
-                                stream.on('error', reject);
-                            });
-
-                            console.log('File read successfully, base64 length:', base64Data.length);
-
-                            const media = new MessageMedia(
-                                mimeType,
-                                base64Data,
-                                path.basename(fullPath)
-                            );
-
-                            // Send the media message with a delay
-                            await new Promise(resolve => setTimeout(resolve, 1000)); // Add delay between messages
-                            await client.sendMessage(chatId, media, {
-                                sendMediaAsDocument: mimeType.startsWith('video/'),
-                                caption: message
-                            });
-
-                            console.log('Media sent successfully');
-
-                        } catch (mediaError) {
-                            console.error('Detailed media error:', {
-                                message: mediaError.message,
-                                stack: mediaError.stack,
-                                mediaPath
-                            });
-                            throw new Error(`فشل في إرسال الوسائط: ${mediaError.message}`);
-                        }
-                    }
-                } else if (message) {
-                    await client.sendMessage(chatId, message);
-                } else {
-                    throw new Error('يجب توفير رسالة أو ملف وسائط');
-                }
-
-                results.success.push(formattedNumber);
-                console.log('✅ Message sent to:', formattedNumber);
-
-            } catch (error) {
-                console.error('Error processing number:', {
-                    number,
-                    error: error.message,
-                    stack: error.stack
-                });
-
-                results.failed.push({
-                    number,
-                    reason: error.message
-                });
-                console.log('❌ Failed for:', number, error.message);
+        const promises = numbers.map(number => {
+            let formattedNumber = number.toString().replace(/\D/g, '');
+            if (!formattedNumber.startsWith('20')) {
+                formattedNumber = '20' + formattedNumber;
             }
-        }
+
+            return new Promise((resolve, reject) => {
+                messageQueue.push({
+                    number: formattedNumber,
+                    message,
+                    mediaPaths,
+                    resolve,
+                    reject
+                });
+            });
+        });
+
+        // Start processing the queue if it's not already running
+        processMessageQueue();
+
+        // Wait for all messages to be processed
+        const messageResults = await Promise.allSettled(promises);
+
+        messageResults.forEach(result => {
+            if (result.status === 'fulfilled' && result.value.success) {
+                results.success.push(result.value.number);
+            } else {
+                results.failed.push({
+                    number: result.reason.number,
+                    reason: result.reason.error
+                });
+            }
+        });
 
         res.json({ results });
 
@@ -353,89 +332,40 @@ app.post('/send-bulk-messages', async (req, res) => {
     }
 });
 
-app.post('/upload-media', (req, res) => {
-    upload.single('media')(req, res, function(err) {
-        if (err instanceof multer.MulterError) {
-            console.error('Multer error:', err);
-            return res.status(400).json({ 
-                error: 'خطأ في رفع الملف',
-                details: err.message 
-            });
-        } else if (err) {
-            console.error('Upload error:', err);
-            return res.status(400).json({ 
-                error: 'خطأ في رفع الملف',
-                details: err.message 
-            });
-        }
+app.post('/upload-media', upload.single('media'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'لم يتم اختيار ملف' });
+    }
 
-        if (!req.file) {
-            return res.status(400).json({ error: 'لم يتم اختيار ملف' });
-        }
-
-        console.log('File uploaded successfully:', {
-            filename: req.file.filename,
-            mimetype: req.file.mimetype,
-            size: req.file.size,
-            path: req.file.path
-        });
-
-        res.json({ 
-            success: true,
-            filePath: req.file.path,
-            fileName: req.file.filename,
-            mimeType: req.file.mimetype
-        });
+    res.json({ 
+        success: true,
+        filePath: req.file.path,
+        fileName: req.file.filename,
+        mimeType: req.file.mimetype
     });
 });
-// Add a basic health check endpoint
+
 app.get('/health', (req, res) => {
     res.json({ status: 'ok' });
-  });
-
-
-
-  // Add root route
-app.get('/', (req, res) => {
-    res.json({ 
-      status: 'Server is running',
-      endpoints: {
-        status: '/status',
-        disconnect: '/disconnect',
-        sendBulkMessages: '/send-bulk-messages',
-        uploadMedia: '/upload-media',
-        health: '/health'
-      }
-    });
-  });
-
-// Add this function to clear uploads and cache
-async function clearUploadsAndCache() {
-    try {
-        // Clear uploads directory
-        const uploadDir = path.join(process.cwd(), 'uploads');
-        if (fs.existsSync(uploadDir)) {
-            fs.rmSync(uploadDir, { recursive: true, force: true });
-            fs.mkdirSync(uploadDir);
-        }
-
-        // Clear auth data
-        await clearAuthData();
-
-        console.log('Successfully cleared uploads and cache');
-    } catch (error) {
-        console.error('Error clearing uploads and cache:', error);
-    }
-}
-
-const PORT = process.env.PORT || 3001;
-// Add this to your server initialization
-const server = app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`Server running on port ${PORT}`);
-    await clearUploadsAndCache(); // Clear everything on server start
 });
 
+app.get('/', (req, res) => {
+    res.json({ 
+        status: 'Server is running',
+        endpoints: {
+            status: '/status',
+            disconnect: '/disconnect',
+            sendBulkMessages: '/send-bulk-messages',
+            uploadMedia: '/upload-media',
+            health: '/health'
+        }
+    });
+});
 
-  server.keepAliveTimeout = 120 * 1000;
-  server.headersTimeout = 120 * 1000;
-  
+const PORT = process.env.PORT || 3001;
+const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on port ${PORT}`);
+});
+
+server.keepAliveTimeout = 120 * 1000;
+server.headersTimeout = 120 * 1000;
